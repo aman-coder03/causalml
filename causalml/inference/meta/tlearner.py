@@ -4,8 +4,10 @@ import numpy as np
 from packaging import version
 from scipy.stats import norm
 import sklearn
+from sklearn.base import clone
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.neural_network import MLPRegressor
+from joblib import Parallel, delayed
 
 if version.parse(sklearn.__version__) >= version.parse("0.22.0"):
     from sklearn.utils._testing import ignore_warnings
@@ -77,9 +79,10 @@ class BaseTLearner(BaseLearner):
         y,
         p=None,
         store_bootstraps=False,
-        n_bootstraps=1000,
+        n_bootstraps=200,
         bootstrap_size=10000,
         random_state=None,
+        n_jobs=1,
     ):
         """Fit the inference model
 
@@ -91,7 +94,12 @@ class BaseTLearner(BaseLearner):
             store_bootstraps (bool, optional): if True, trains a bootstrap ensemble
                 during fit and stores it in self.bootstrap_models_ for post-fit CI
                 estimation via predict(return_ci=True). Default: False.
-            n_bootstraps (int, optional): number of bootstrap iterations. Default: 1000.
+            n_bootstraps (int, optional): number of bootstrap iterations. Default: 200.
+                Note: storing N bootstraps of a GBM-based learner with k treatment
+                groups holds 2*N*k model objects in memory. Monitor RAM for large N
+                or heavy base learners.
+            n_jobs (int, optional): number of parallel jobs for bootstrap fitting.
+                -1 uses all available cores. Default: 1.
             bootstrap_size (int, optional): number of samples per bootstrap. Default: 10000.
             random_state (int, optional): random seed for reproducible bootstrap sampling.
         """
@@ -118,12 +126,14 @@ class BaseTLearner(BaseLearner):
             logger.info(
                 "Storing bootstrap ensemble ({} iterations)".format(n_bootstraps)
             )
-            self.bootstrap_models_ = []
-            for i in tqdm(range(n_bootstraps)):
-                idxs = rng.choice(np.arange(X.shape[0]), size=bootstrap_size)
+            seeds = rng.randint(0, np.iinfo(np.int32).max, size=n_bootstraps)
+
+            def _fit_one_bootstrap(seed):
+                local_rng = np.random.RandomState(seed)
+                idxs = local_rng.choice(np.arange(X.shape[0]), size=bootstrap_size)
                 X_b, treatment_b, y_b = X[idxs], treatment[idxs], y[idxs]
-                models_c_b = {group: deepcopy(self.model_c) for group in self.t_groups}
-                models_t_b = {group: deepcopy(self.model_t) for group in self.t_groups}
+                models_c_b = {group: clone(self.model_c) for group in self.t_groups}
+                models_t_b = {group: clone(self.model_t) for group in self.t_groups}
                 for group in self.t_groups:
                     mask = (treatment_b == group) | (treatment_b == self.control_name)
                     treatment_filt = treatment_b[mask]
@@ -131,12 +141,21 @@ class BaseTLearner(BaseLearner):
                     y_filt = y_b[mask]
                     w = (treatment_filt == group).astype(int)
                     if w.sum() == 0 or (w == 0).sum() == 0:
+                        logger.warning(
+                            "Bootstrap sample has no treated or no control units "
+                            "for group {}. Falling back to global model — "
+                            "CI may be underestimated.".format(group)
+                        )
                         models_c_b[group] = self.models_c[group]
                         models_t_b[group] = self.models_t[group]
                         continue
                     models_c_b[group].fit(X_filt[w == 0], y_filt[w == 0])
                     models_t_b[group].fit(X_filt[w == 1], y_filt[w == 1])
-                self.bootstrap_models_.append((models_c_b, models_t_b))
+                return models_c_b, models_t_b
+
+            self.bootstrap_models_ = Parallel(n_jobs=n_jobs)(
+                delayed(_fit_one_bootstrap)(s) for s in tqdm(seeds)
+            )
         else:
             self.bootstrap_models_ = None
 
