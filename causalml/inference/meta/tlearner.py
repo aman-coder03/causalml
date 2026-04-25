@@ -4,10 +4,8 @@ import numpy as np
 from packaging import version
 from scipy.stats import norm
 import sklearn
-from sklearn.base import clone
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.neural_network import MLPRegressor
-from joblib import Parallel, delayed
 
 if version.parse(sklearn.__version__) >= version.parse("0.22.0"):
     from sklearn.utils._testing import ignore_warnings
@@ -122,39 +120,14 @@ class BaseTLearner(BaseLearner):
             self.models_t[group].fit(X_filt[w == 1], y_filt[w == 1])
 
         if store_bootstraps:
-            rng = np.random.RandomState(random_state)
-            logger.info(
-                "Storing bootstrap ensemble ({} iterations)".format(n_bootstraps)
-            )
-            seeds = rng.randint(0, np.iinfo(np.int32).max, size=n_bootstraps)
-
-            def _fit_one_bootstrap(seed):
-                local_rng = np.random.RandomState(seed)
-                idxs = local_rng.choice(np.arange(X.shape[0]), size=bootstrap_size)
-                X_b, treatment_b, y_b = X[idxs], treatment[idxs], y[idxs]
-                models_c_b = {group: clone(self.model_c) for group in self.t_groups}
-                models_t_b = {group: clone(self.model_t) for group in self.t_groups}
-                for group in self.t_groups:
-                    mask = (treatment_b == group) | (treatment_b == self.control_name)
-                    treatment_filt = treatment_b[mask]
-                    X_filt = X_b[mask]
-                    y_filt = y_b[mask]
-                    w = (treatment_filt == group).astype(int)
-                    if w.sum() == 0 or (w == 0).sum() == 0:
-                        logger.warning(
-                            "Bootstrap sample has no treated or no control units "
-                            "for group {}. Falling back to global model — "
-                            "CI may be underestimated.".format(group)
-                        )
-                        models_c_b[group] = self.models_c[group]
-                        models_t_b[group] = self.models_t[group]
-                        continue
-                    models_c_b[group].fit(X_filt[w == 0], y_filt[w == 0])
-                    models_t_b[group].fit(X_filt[w == 1], y_filt[w == 1])
-                return models_c_b, models_t_b
-
-            self.bootstrap_models_ = Parallel(n_jobs=n_jobs)(
-                delayed(_fit_one_bootstrap)(s) for s in tqdm(seeds)
+            self.fit_bootstrap_ensemble(
+                X=X,
+                treatment=treatment,
+                y=y,
+                n_bootstraps=n_bootstraps,
+                bootstrap_size=bootstrap_size,
+                random_state=random_state,
+                n_jobs=n_jobs,
             )
         else:
             self.bootstrap_models_ = None
