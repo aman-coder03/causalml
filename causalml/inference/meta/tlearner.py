@@ -198,11 +198,8 @@ class BaseTLearner(BaseLearner):
             te_bootstraps = np.zeros(
                 (X.shape[0], self.t_groups.shape[0], len(self.bootstrap_models_))
             )
-            for b, (models_c_b, models_t_b) in enumerate(self.bootstrap_models_):
-                for i, group in enumerate(self.t_groups):
-                    te_bootstraps[:, i, b] = models_t_b[group].predict(X) - models_c_b[
-                        group
-                    ].predict(X)
+            for b, learner_b in enumerate(self.bootstrap_models_):
+                te_bootstraps[:, :, b] = learner_b.predict(X)
             te_lower = np.percentile(te_bootstraps, (self.ate_alpha / 2) * 100, axis=2)
             te_upper = np.percentile(
                 te_bootstraps, (1 - self.ate_alpha / 2) * 100, axis=2

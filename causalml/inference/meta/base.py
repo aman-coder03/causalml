@@ -78,6 +78,7 @@ class BaseLearner(metaclass=ABCMeta):
         X,
         treatment,
         y,
+        p=None,
         n_bootstraps=200,
         bootstrap_size=10000,
         random_state=None,
@@ -85,24 +86,29 @@ class BaseLearner(metaclass=ABCMeta):
     ):
         """Train and store a bootstrap ensemble for post-fit CI estimation.
 
-        Fits n_bootstraps cloned copies of the learner on bootstrap samples and
-        stores them in self.bootstrap_models_. Used by predict(return_ci=True)
-        to compute percentile-based confidence intervals on new data without
-        refitting.
+        Fits n_bootstraps cloned copies of the entire learner on bootstrap samples
+        and stores them in self.bootstrap_models_. Used by predict(return_ci=True)
+        to compute percentile-based confidence intervals on new data without refitting.
 
-        Note: storing N bootstraps of a GBM-based learner with k treatment groups
-        holds 2*N*k model objects in memory. Monitor RAM for large N or heavy
-        base learners.
+        This design follows EconML's BootstrapEstimator pattern — each bootstrap
+        clone is a full copy of the learner, making this method generic across all
+        meta-learners.
+
+        Note: storing N bootstrap clones can be memory-intensive for heavy base
+        learners. Monitor RAM for large n_bootstraps.
 
         Args:
             X (np.matrix or np.array or pd.Dataframe): a feature matrix
             treatment (np.array or pd.Series): a treatment vector
             y (np.array or pd.Series): an outcome vector
+            p: propensity scores, passed through to fit() if provided
             n_bootstraps (int, optional): number of bootstrap iterations. Default: 200.
             bootstrap_size (int, optional): number of samples per bootstrap. Default: 10000.
             random_state (int, optional): random seed for reproducibility.
             n_jobs (int, optional): number of parallel jobs. -1 uses all cores. Default: 1.
         """
+        from sklearn.base import clone
+
         rng = np.random.RandomState(random_state)
         seeds = rng.randint(0, np.iinfo(np.int32).max, size=n_bootstraps)
         logger.info("Storing bootstrap ensemble ({} iterations)".format(n_bootstraps))
@@ -110,27 +116,15 @@ class BaseLearner(metaclass=ABCMeta):
         def _fit_one(seed):
             local_rng = np.random.RandomState(seed)
             idxs = local_rng.choice(np.arange(X.shape[0]), size=bootstrap_size)
-            X_b, treatment_b, y_b = X[idxs], treatment[idxs], y[idxs]
-            models_c_b = {group: clone(self.model_c) for group in self.t_groups}
-            models_t_b = {group: clone(self.model_t) for group in self.t_groups}
-            for group in self.t_groups:
-                mask = (treatment_b == group) | (treatment_b == self.control_name)
-                treatment_filt = treatment_b[mask]
-                X_filt = X_b[mask]
-                y_filt = y_b[mask]
-                w = (treatment_filt == group).astype(int)
-                if w.sum() == 0 or (w == 0).sum() == 0:
-                    logger.warning(
-                        "Bootstrap sample has no treated or no control units "
-                        "for group {}. Falling back to global model — "
-                        "CI may be underestimated.".format(group)
-                    )
-                    models_c_b[group] = self.models_c[group]
-                    models_t_b[group] = self.models_t[group]
-                    continue
-                models_c_b[group].fit(X_filt[w == 0], y_filt[w == 0])
-                models_t_b[group].fit(X_filt[w == 1], y_filt[w == 1])
-            return models_c_b, models_t_b
+            X_b = X[idxs]
+            treatment_b = treatment[idxs]
+            y_b = y[idxs]
+            p_b = (
+                {group: _p[idxs] for group, _p in p.items()} if p is not None else None
+            )
+            learner_b = clone(self, safe=False)
+            learner_b.fit(X=X_b, treatment=treatment_b, y=y_b, p=p_b)
+            return learner_b
 
         self.bootstrap_models_ = Parallel(n_jobs=n_jobs)(
             delayed(_fit_one)(s) for s in tqdm(seeds)
