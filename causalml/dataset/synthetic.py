@@ -10,6 +10,10 @@ try:
     from xgboost import XGBRegressor
 except ImportError:  # pragma: no cover
     XGBRegressor = None
+except ValueError as exc:
+    from causalml.exceptions import handle_xgboost_error
+
+    handle_xgboost_error(exc)
 from scipy.stats import entropy
 import warnings
 
