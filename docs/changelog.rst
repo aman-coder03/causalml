@@ -8,8 +8,92 @@ You can find the latest changes in the `GitHub releases <https://github.com/uber
 Unreleased
 ----------
 
+New Features
+~~~~~~~~~~~~
+* **`CausalTreeRegressor` and `CausalRandomForestRegressor` accept** ``ccp_alpha="cv"``
+  **(#584).** ``honesty=True`` supplies held-out leaf estimation; this setting adds the
+  two remaining pieces of :cite:`athey2016recursive`. The splitting objective's variance penalty is scaled by
+  ``1 + N_structure / N_estimation`` — the paper's factor of 2 at an even split — and tree
+  size is selected by ``cv_folds``-fold cross-validation over the cost-complexity path,
+  scoring each candidate subtree with that same objective evaluated on the held-out fold.
+
+  Without it the tree grows until ``min_samples_leaf`` / ``min_group_samples`` stop it, and
+  the variance penalty only ranks candidate splits instead of choosing tree size, which is
+  the job it does in the paper. Held-out CATE RMSE for a single tree on a weak effect
+  (16 seeds, ``min_samples_leaf=25``, paired by seed):
+
+  .. list-table::
+     :header-rows: 1
+
+     * - Noise
+       - ``honesty`` only
+       - ``ccp_alpha="cv"``
+       - Change
+       - Leaves
+     * - ``sigma=0.1``
+       - 0.1212
+       - 0.1192
+       - -1.7% (n.s.)
+       - 46 → 14
+     * - ``sigma=0.5``
+       - 0.2128
+       - 0.1676
+       - **-21.2%**
+       - 46 → 13
+     * - ``sigma=1.0``
+       - 0.3499
+       - 0.2287
+       - **-34.6%**
+       - 46 → 10
+     * - ``sigma=2.0``
+       - 0.7011
+       - 0.2977
+       - **-57.5%**
+       - 46 → 8
+
+  Better in 16 of 16 seeds at every noise level above 0.1, ``p < 0.0001``; at
+  ``sigma=0.1`` there is no overfitting to remove and the two are equivalent. The cost is
+  ``cv_folds`` extra fits per tree, roughly 5x fit time. Off by default because it changes
+  fitted trees.
+
+  This applies to a single tree. On ``CausalRandomForestRegressor`` the same option
+  measured no gain: held-out CATE RMSE went from 0.084 to 0.130 at ``sigma=0.5`` (+55%,
+  0 of 10 paired seeds better) and was unchanged at ``sigma=2.0``. Averaging across trees
+  already removes the variance the cross-validated pruning targets, so pruning each tree to
+  a few leaves adds bias and reduces ensemble diversity, at a larger cost when noise is
+  lower. Prefer it on ``CausalTreeRegressor``.
+
+  ``ccp_alpha="cv"`` requires ``honesty=True`` and raises otherwise, since the
+  cross-validation scores candidate subtrees with the honest objective.
+
 Behavior Changes
 ~~~~~~~~~~~~~~~~
+* **`CausalTreeRegressor` and `CausalRandomForestRegressor` now estimate leaves honestly by
+  default (#584).** The new ``honesty`` parameter defaults to ``True``: the sample is split
+  in two, the tree structure is grown on one half and each leaf's per-group outcome means
+  are re-estimated on the other, so a leaf value no longer inherits the selection bias of
+  the split search that produced it :cite:`athey2016recursive`.
+  ``estimation_sample_size`` (default ``0.5``) sets the held-out fraction, and the split is
+  stratified on treatment. Both are the names ``UpliftTreeClassifier`` already uses, and
+  the default matches ``grf``'s ``honesty = TRUE`` and EconML's ``honest=True``.
+
+  **This changes fitted models and predictions.** An existing script gets a different tree,
+  different leaf values and different CATE estimates without any edit. Pass
+  ``honesty=False`` to keep the previous behavior.
+
+  Measured over 200 replications on data with no treatment effect anywhere, with the tree
+  structure held fixed across both arms: in-sample leaves reported a mean absolute
+  estimated effect of 0.163 versus 0.095 for honest leaves, a 42% reduction in spurious
+  heterogeneity. The trade is variance: each half sees only part of the data, so an honest
+  tree is shallower and noisier per leaf, and at small sample sizes an individual estimate
+  can be worse. Use ``honesty=False`` when halving the sample leaves too little to split
+  on.
+
+  On the forest, honesty composes with ``bootstrap`` rather than replacing it: the
+  bootstrap counts arrive as each tree's ``sample_weight`` and weight both the structure
+  fit and the leaf re-estimation, so this is not the subsample-without-replacement scheme
+  of :cite:`athey2019generalized`.
+
 * **`UpliftRandomForestClassifier` now defaults to** ``n_jobs=None`` **(one worker) instead of**
   ``n_jobs=-1`` **(#991).** Trees are fitted in parallel and each concurrent fit holds its own
   working set, so peak memory grew in proportion to the machine's core count — the same fit

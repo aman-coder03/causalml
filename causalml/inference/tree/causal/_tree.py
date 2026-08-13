@@ -71,6 +71,25 @@ class BaseCausalDecisionTree(BaseDecisionTree):
         tags.input_tags.allow_nan = self.splitter == "best"
         return tags
 
+    def _prune_tree(self):
+        """Prune with the fitted ``ccp_alpha_`` when one was selected.
+
+        Mirrors the base implementation, which reads the ``ccp_alpha`` constructor
+        parameter directly. ``CausalTreeRegressor`` may choose the penalty by
+        cross-validation instead (``ccp_alpha="cv"``), and sklearn's convention
+        is that a value learned at fit time lives on a trailing-underscore attribute
+        rather than overwriting the parameter.
+        """
+        ccp_alpha = getattr(self, "ccp_alpha_", None)
+        if ccp_alpha is None or ccp_alpha == self.ccp_alpha:
+            return super()._prune_tree()
+
+        original, self.ccp_alpha = self.ccp_alpha, ccp_alpha
+        try:
+            return super()._prune_tree()
+        finally:
+            self.ccp_alpha = original
+
     def fit(
         self,
         X: np.ndarray,
@@ -81,7 +100,10 @@ class BaseCausalDecisionTree(BaseDecisionTree):
     ):
         random_state = check_random_state(self.random_state)
 
-        if self.ccp_alpha < 0.0:
+        # ``ccp_alpha`` may be a sentinel such as "cv", in which case the resolved
+        # penalty lives on ``ccp_alpha_`` and the sentinel itself is not comparable.
+        ccp_alpha = getattr(self, "ccp_alpha_", self.ccp_alpha)
+        if not isinstance(ccp_alpha, str) and ccp_alpha < 0.0:
             raise ValueError("ccp_alpha must be greater than or equal to 0")
 
         missing_values_in_feature_mask = None
@@ -241,6 +263,10 @@ class BaseCausalDecisionTree(BaseDecisionTree):
         if isinstance(criterion, str):
             criterion = CAUSAL_TREES_CRITERIA[criterion](self.n_outputs_, n_samples)
             criterion.groups_penalty = self.groups_penalty
+            # N^tr / N^est, scaling the honest variance penalty. Read via getattr
+            # so subclasses that do not do honest estimation keep the unscaled
+            # penalty (0.0) without having to declare the attribute.
+            criterion.train_to_est_ratio = getattr(self, "_train_to_est_ratio", 0.0)
         else:
             # Make a deepcopy in case the criterion has mutable attributes that
             # might be shared and modified concurrently during parallel fitting
